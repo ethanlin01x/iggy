@@ -29,6 +29,7 @@
 
 #include <gtest/gtest.h>
 
+#include "iggy.hpp"
 #include "lib.rs.h"
 
 inline iggy::ffi::Identifier make_string_identifier(const std::string &value) {
@@ -41,6 +42,16 @@ inline iggy::ffi::Identifier make_numeric_identifier(const std::uint32_t value) 
     iggy::ffi::Identifier identifier;
     identifier.set_numeric(value);
     return identifier;
+}
+
+/// Builds a consumer the `iggy::Consumer` factories cannot, so that the tests can reach the kind
+/// and identifier validation the FFI does on the way in. The bridge enum is open across the FFI,
+/// so a discriminant outside the generated set is representable here.
+inline iggy::ffi::Consumer make_consumer(const iggy::ffi::ConsumerKind kind, iggy::ffi::Identifier id) {
+    iggy::ffi::Consumer consumer{};
+    consumer.kind = kind;
+    consumer.id   = std::move(id);
+    return consumer;
 }
 
 inline rust::Vec<std::uint8_t> to_payload(const std::string &s) {

@@ -55,6 +55,28 @@ class StringTag {
     std::string value_;
 };
 
+inline iggy::ffi::Identifier to_identifier(const std::string &name) {
+    iggy::ffi::Identifier identifier{};
+    identifier.set_string(name);
+
+    return identifier;
+}
+
+inline iggy::ffi::Identifier to_identifier(const std::uint32_t id) {
+    iggy::ffi::Identifier identifier{};
+    identifier.set_numeric(id);
+
+    return identifier;
+}
+
+inline iggy::ffi::Consumer to_consumer(const iggy::ffi::ConsumerKind kind, iggy::ffi::Identifier id) {
+    iggy::ffi::Consumer consumer{};
+    consumer.kind = kind;
+    consumer.id   = std::move(id);
+
+    return consumer;
+}
+
 }  // namespace detail
 
 /**
@@ -332,6 +354,82 @@ class PollingStrategy final {
 
     std::string polling_strategy_kind_;
     std::uint64_t polling_strategy_value_;
+};
+
+/**
+ * @brief Partition value that leaves the polled partition unset.
+ *
+ * A standalone consumer then reads partition 0. A consumer group reads the
+ * partitions assigned to the calling member.
+ */
+inline constexpr std::uint32_t kAnyPartitionId{std::numeric_limits<std::uint32_t>::max()};
+
+/**
+ * @brief Identifies the consumer a poll or a consumer offset call is keyed on.
+ *
+ * The factory selects between a standalone consumer and a member of a consumer
+ * group. The identifier is what the server keys the stored offset on, so two
+ * clients using the same standalone identifier share one offset slot and split
+ * the partition between them instead of each reading all of it.
+ *
+ * @code{.cpp}
+ * auto polled{client->poll_messages(stream, topic, iggy::kAnyPartitionId,
+ *                                   iggy::Consumer::Group("my-group"),
+ *                                   std::string(strategy.PollingStrategyKind()),
+ *                                   strategy.PollingStrategyValue(), 10, true)};
+ * @endcode
+ *
+ * @note A string identifier is validated here and must hold 1 to 255 bytes.
+ *       Every numeric identifier is accepted, including `0`.
+ */
+class Consumer final {
+  public:
+    /**
+     * @brief Creates a standalone consumer that owns its offset.
+     * @param name Consumer name, 1 to 255 bytes.
+     * @return Consumer keyed on that name.
+     * @throws rust::Error The name is empty or longer than 255 bytes.
+     */
+    static iggy::ffi::Consumer Single(const std::string &name) {
+        return detail::to_consumer(iggy::ffi::ConsumerKind::Single, detail::to_identifier(name));
+    }
+
+    /**
+     * @brief Creates a standalone consumer that owns its offset.
+     * @param id Numeric consumer identifier.
+     * @return Consumer keyed on that identifier.
+     */
+    static iggy::ffi::Consumer Single(const std::uint32_t id) {
+        return detail::to_consumer(iggy::ffi::ConsumerKind::Single, detail::to_identifier(id));
+    }
+
+    /**
+     * @brief Creates a consumer group member that shares the group's offset.
+     * @param name Consumer group name, 1 to 255 bytes.
+     * @return Consumer keyed on that group.
+     * @throws rust::Error The name is empty or longer than 255 bytes.
+     *
+     * @note The calling client must have joined the group through
+     *       `Client::join_consumer_group(...)`. Without a membership the server
+     *       has no partition assignment to serve and rejects the poll.
+     */
+    static iggy::ffi::Consumer Group(const std::string &name) {
+        return detail::to_consumer(iggy::ffi::ConsumerKind::Group, detail::to_identifier(name));
+    }
+
+    /**
+     * @brief Creates a consumer group member that shares the group's offset.
+     * @param id Numeric consumer group identifier.
+     * @return Consumer keyed on that group.
+     *
+     * @note See `Group(const std::string &)` for the membership requirement.
+     */
+    static iggy::ffi::Consumer Group(const std::uint32_t id) {
+        return detail::to_consumer(iggy::ffi::ConsumerKind::Group, detail::to_identifier(id));
+    }
+
+  private:
+    Consumer() = delete;
 };
 
 namespace detail {

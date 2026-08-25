@@ -2384,8 +2384,8 @@ TEST_F(LowLevelE2E_Client, DeleteSegmentsWithZeroCountIsNoOp) {
     iggy::ffi::PolledMessages polled_before_delete{};
     ASSERT_NO_THROW({
         polled_before_delete =
-            client->poll_messages(make_numeric_identifier(stream_id), make_numeric_identifier(topic_id), 0, "consumer",
-                                  make_numeric_identifier(1005), "offset", 0, 1000, false);
+            client->poll_messages(make_numeric_identifier(stream_id), make_numeric_identifier(topic_id), 0,
+                                  iggy::Consumer::Single(1005), "offset", 0, 1000, false);
     });
 
     ASSERT_NO_THROW(
@@ -2406,8 +2406,8 @@ TEST_F(LowLevelE2E_Client, DeleteSegmentsWithZeroCountIsNoOp) {
     iggy::ffi::PolledMessages polled_after_delete{};
     ASSERT_NO_THROW({
         polled_after_delete =
-            client->poll_messages(make_numeric_identifier(stream_id), make_numeric_identifier(topic_id), 0, "consumer",
-                                  make_numeric_identifier(1006), "offset", 0, 1000, false);
+            client->poll_messages(make_numeric_identifier(stream_id), make_numeric_identifier(topic_id), 0,
+                                  iggy::Consumer::Single(1006), "offset", 0, 1000, false);
     });
 
     EXPECT_EQ(partition_after_delete.segments_count, partition_before_delete.segments_count);
@@ -2466,8 +2466,8 @@ TEST_F(LowLevelE2E_Client, DeleteSegmentsWhenOnlyActiveSegmentRemainsIsNoOp) {
     iggy::ffi::PolledMessages polled_before_delete{};
     ASSERT_NO_THROW({
         polled_before_delete =
-            client->poll_messages(make_numeric_identifier(stream_id), make_numeric_identifier(topic_id), 0, "consumer",
-                                  make_numeric_identifier(1007), "offset", 0, 1000, false);
+            client->poll_messages(make_numeric_identifier(stream_id), make_numeric_identifier(topic_id), 0,
+                                  iggy::Consumer::Single(1007), "offset", 0, 1000, false);
     });
 
     ASSERT_NO_THROW(
@@ -2488,8 +2488,8 @@ TEST_F(LowLevelE2E_Client, DeleteSegmentsWhenOnlyActiveSegmentRemainsIsNoOp) {
     iggy::ffi::PolledMessages polled_after_delete{};
     ASSERT_NO_THROW({
         polled_after_delete =
-            client->poll_messages(make_numeric_identifier(stream_id), make_numeric_identifier(topic_id), 0, "consumer",
-                                  make_numeric_identifier(1008), "offset", 0, 1000, false);
+            client->poll_messages(make_numeric_identifier(stream_id), make_numeric_identifier(topic_id), 0,
+                                  iggy::Consumer::Single(1008), "offset", 0, 1000, false);
     });
 
     EXPECT_EQ(partition_after_delete.segments_count, partition_before_delete.segments_count);
