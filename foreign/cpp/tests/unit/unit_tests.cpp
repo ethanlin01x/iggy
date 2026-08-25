@@ -40,6 +40,14 @@ constexpr std::uint8_t kind_code(const iggy::ffi::HeaderKind kind) {
     return static_cast<std::uint8_t>(kind);
 }
 
+std::string identifier_text(const iggy::ffi::Identifier &identifier) {
+    return std::string(identifier.value.begin(), identifier.value.end());
+}
+
+std::vector<std::uint8_t> identifier_bytes(const iggy::ffi::Identifier &identifier) {
+    return std::vector<std::uint8_t>(identifier.value.begin(), identifier.value.end());
+}
+
 }  // namespace
 
 TEST(CompressionAlgorithmTest, ReturnsExpectedValues) {
@@ -100,6 +108,47 @@ TEST(PollingStrategyTest, ReturnsExpectedKindAndValue) {
     const auto next = iggy::PollingStrategy::Next();
     EXPECT_EQ(next.PollingStrategyKind(), "next");
     EXPECT_EQ(next.PollingStrategyValue(), 0u);
+}
+
+TEST(ConsumerTest, SingleReturnsConsumerKind) {
+    const auto named = iggy::Consumer::Single("polling-app");
+    EXPECT_EQ(named.kind, iggy::ffi::ConsumerKind::Single);
+    EXPECT_EQ(named.id.kind, "string");
+    EXPECT_EQ(identifier_text(named.id), "polling-app");
+
+    const auto numeric = iggy::Consumer::Single(7);
+    EXPECT_EQ(numeric.kind, iggy::ffi::ConsumerKind::Single);
+    EXPECT_EQ(numeric.id.kind, "numeric");
+    EXPECT_EQ(identifier_bytes(numeric.id), (std::vector<std::uint8_t>{0x07, 0x00, 0x00, 0x00}));
+}
+
+TEST(ConsumerTest, GroupReturnsConsumerGroupKind) {
+    const auto named = iggy::Consumer::Group("polling-group");
+    EXPECT_EQ(named.kind, iggy::ffi::ConsumerKind::Group);
+    EXPECT_EQ(named.id.kind, "string");
+    EXPECT_EQ(identifier_text(named.id), "polling-group");
+
+    const auto numeric = iggy::Consumer::Group(7);
+    EXPECT_EQ(numeric.kind, iggy::ffi::ConsumerKind::Group);
+    EXPECT_EQ(numeric.id.kind, "numeric");
+    EXPECT_EQ(identifier_bytes(numeric.id), (std::vector<std::uint8_t>{0x07, 0x00, 0x00, 0x00}));
+}
+
+TEST(ConsumerTest, AcceptsEveryNumericId) {
+    EXPECT_EQ(identifier_bytes(iggy::Consumer::Single(0).id), (std::vector<std::uint8_t>{0x00, 0x00, 0x00, 0x00}));
+    EXPECT_EQ(identifier_bytes(iggy::Consumer::Group(std::numeric_limits<std::uint32_t>::max()).id),
+              (std::vector<std::uint8_t>{0xFF, 0xFF, 0xFF, 0xFF}));
+}
+
+TEST(ConsumerTest, RejectsStringIdOutsideOneToTwoHundredFiftyFiveBytes) {
+    EXPECT_THROW(iggy::Consumer::Single(""), std::exception);
+    EXPECT_THROW(iggy::Consumer::Group(""), std::exception);
+    EXPECT_THROW(iggy::Consumer::Single(std::string(256, 'a')), std::exception);
+    EXPECT_THROW(iggy::Consumer::Group(std::string(256, 'a')), std::exception);
+}
+
+TEST(AnyPartitionIdTest, MatchesTheSentinelTheFfiExpects) {
+    EXPECT_EQ(iggy::kAnyPartitionId, std::numeric_limits<std::uint32_t>::max());
 }
 
 TEST(ExpiryTest, ReturnsExpectedKindAndValue) {
