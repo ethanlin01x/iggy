@@ -748,6 +748,60 @@ func TestConnect_ConcurrentReconnectsThroughExchangeShareOneAttempt(t *testing.T
 		"the two failing requests reconnected separately")
 }
 
+// A teardown names the connection its request failed on. One that does not
+// closes whatever is installed by the time it runs, and the caller that dialed
+// that one -- holding the single replay a reconnect grants -- then sends over a
+// transport this call has just marked disconnected. That is the ErrNotConnected
+// a concurrent reconnect surfaced.
+func TestDisconnect_LeavesAConnectionDialedAfterTheFailureAlone(t *testing.T) {
+	var server *testListener
+	server = listenVSR(t, nil, singleNodeHandler(t, func() string { return server.address() }))
+
+	client := newDialingClient(t, server.address(),
+		WithAutoLogin(NewUsernamePasswordCredentials("iggy", "iggy")))
+	require.NoError(t, client.Connect(context.Background()))
+
+	client.mtx.Lock()
+	failed := client.connGeneration
+	client.mtx.Unlock()
+
+	// Stands in for the caller that lost the same connection, reconnected
+	// first, and is about to replay over the one it dialed.
+	require.NoError(t, client.disconnect())
+	require.NoError(t, client.Connect(context.Background()))
+
+	require.NoError(t, client.disconnectGeneration(failed))
+
+	require.NoError(t, client.Ping(context.Background()),
+		"the teardown closed a connection it did not own")
+	assert.Equal(t, 2, server.connections(),
+		"the ping had to dial, so the connection it should have reused was closed")
+}
+
+// The same teardown still ends the connection its own request failed on, which
+// is what lets the reconnect that follows dial a fresh one.
+func TestDisconnect_EndsTheConnectionItsRequestRanOn(t *testing.T) {
+	var server *testListener
+	server = listenVSR(t, nil, singleNodeHandler(t, func() string { return server.address() }))
+
+	client := newDialingClient(t, server.address(),
+		WithAutoLogin(NewUsernamePasswordCredentials("iggy", "iggy")))
+	require.NoError(t, client.Connect(context.Background()))
+
+	client.mtx.Lock()
+	current := client.connGeneration
+	client.mtx.Unlock()
+
+	require.NoError(t, client.disconnectGeneration(current))
+
+	client.mtx.Lock()
+	state := client.transportState
+	conn := client.conn
+	client.mtx.Unlock()
+	assert.Equal(t, iggcon.TransportStateDisconnected, state)
+	assert.Nil(t, conn)
+}
+
 // The sign-in transaction holds registerMtx across its reconnect, and an
 // attempt started by a plain request ends in a sign-in that needs that same
 // lock. Waiting for that attempt closes a cycle -- the owner blocked on

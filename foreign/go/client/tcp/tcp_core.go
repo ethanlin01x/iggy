@@ -89,8 +89,14 @@ type IggyTcpClient struct {
 	currentServerAddress   string
 	knownServerAddresses   []string
 	connectedAt            time.Time
-	transportState         iggcon.TransportState
-	sessionState           iggcon.SessionState
+	// connGeneration counts the connections installed on this client, so a
+	// caller can name the one its request ran on. A teardown that cannot say
+	// which connection it means will happily close a connection somebody else
+	// dialed after the failure, and that owner's replay -- its only one --
+	// then runs on a transport that is Disconnected. Guarded by c.mtx.
+	connGeneration uint64
+	transportState iggcon.TransportState
+	sessionState   iggcon.SessionState
 	// session carries the consensus client identity and request watermark;
 	// guarded by c.mtx.
 	session *vsr.Session
@@ -514,7 +520,7 @@ func (e *localPreconditionError) Unwrap() error { return e.err }
 // exchange runs one request to completion, reconnecting and replaying it when
 // the failure is one a fresh connection recovers from.
 func (c *IggyTcpClient) exchange(ctx context.Context, code uint32, frame []byte) ([]byte, error) {
-	response, err := c.sendFrame(ctx, code, frame)
+	response, generation, err := c.sendFrame(ctx, code, frame)
 	if err == nil || !isReconnectable(err) {
 		return response, err
 	}
@@ -558,7 +564,10 @@ func (c *IggyTcpClient) exchange(ctx context.Context, code uint32, frame []byte)
 		return nil, err
 	}
 
-	if disconnectErr := c.disconnect(); disconnectErr != nil {
+	// Named, so a connection somebody else dialed after this request failed is
+	// left alone. Tearing that one down would spend its owner's only replay on
+	// a transport this call had just marked disconnected.
+	if disconnectErr := c.disconnectGeneration(generation); disconnectErr != nil {
 		return nil, disconnectErr
 	}
 	reconnectCtx := ctx
@@ -577,7 +586,8 @@ func (c *IggyTcpClient) exchange(ctx context.Context, code uint32, frame []byte)
 	if reconnectErr := c.Connect(reconnectCtx); reconnectErr != nil {
 		return nil, reconnectErr
 	}
-	return c.sendFrame(ctx, code, frame)
+	replay, _, replayErr := c.sendFrame(ctx, code, frame)
+	return replay, replayErr
 }
 
 // canReplay reports whether re-issuing the request over a fresh connection
@@ -630,13 +640,15 @@ func isReconnectable(err error) bool {
 }
 
 // sendFrame runs the request against the current connection. One deadline
-// bounds it across every same-connection replay and every leader failover.
-func (c *IggyTcpClient) sendFrame(ctx context.Context, code uint32, frame []byte) ([]byte, error) {
+// bounds it across every same-connection replay and every leader failover. It
+// reports the connection generation the last attempt ran on, so a caller
+// tearing the transport down after a failure can name the connection it means.
+func (c *IggyTcpClient) sendFrame(ctx context.Context, code uint32, frame []byte) ([]byte, uint64, error) {
 	if ctx == nil {
-		return nil, ierror.ErrNilContext
+		return nil, 0, ierror.ErrNilContext
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	deadline := time.Now().Add(responseReadTimeout)
@@ -659,13 +671,13 @@ func (c *IggyTcpClient) sendFrame(ctx context.Context, code uint32, frame []byte
 			}
 		}
 
-		response, attemptStamped, err := c.attempt(
+		response, attemptStamped, generation, err := c.attempt(
 			ctx, code, frame, stamped, transientDeadline, deadline)
 		stamped = attemptStamped
 
 		switch {
 		case err == nil:
-			return response, nil
+			return response, generation, nil
 		case errors.Is(err, ierror.ErrTransientNotAccepted) &&
 			!isRegisterCode(code) && time.Now().Before(deadline):
 			// The server never admitted the request, so re-issuing it cannot
@@ -677,7 +689,7 @@ func (c *IggyTcpClient) sendFrame(ctx context.Context, code uint32, frame []byte
 				var redirectErr error
 				redirect, redirectErr = c.HandleLeaderRedirection(ctx)
 				if redirectErr != nil {
-					return nil, redirectErr
+					return nil, generation, redirectErr
 				}
 			}
 			if !redirect {
@@ -691,7 +703,7 @@ func (c *IggyTcpClient) sendFrame(ctx context.Context, code uint32, frame []byte
 				var walkErr error
 				walked, walkErr = c.settleOnNextEndpoint(visitedRosterEndpoints)
 				if walkErr != nil {
-					return nil, walkErr
+					return nil, generation, walkErr
 				}
 				if walked {
 					walkingRoster = true
@@ -711,41 +723,44 @@ func (c *IggyTcpClient) sendFrame(ctx context.Context, code uint32, frame []byte
 					redirectCtx = suppressAutoLogin(ctx)
 				}
 				if connectErr := c.Connect(redirectCtx); connectErr != nil {
-					return nil, connectErr
+					return nil, generation, connectErr
 				}
 				stamped = false
 			}
 		default:
-			return nil, err
+			return nil, generation, err
 		}
 	}
 }
 
 // attempt stamps the frame if it is not stamped yet and exchanges it once,
-// replaying in place while the server answers transiently.
+// replaying in place while the server answers transiently. It reports the
+// connection generation it ran on, so a caller tearing the transport down
+// after a failure can say which connection it means.
 func (c *IggyTcpClient) attempt(
 	ctx context.Context,
 	code uint32,
 	frame []byte,
 	stamped bool,
 	transientDeadline, readDeadline time.Time,
-) ([]byte, bool, error) {
+) ([]byte, bool, uint64, error) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
+	generation := c.connGeneration
 	switch c.transportState {
 	case iggcon.TransportStateShutdown:
 		c.logger.Debug("Cannot send data. Client is shutdown.")
-		return nil, stamped, ierror.ErrClientShutdown
+		return nil, stamped, generation, ierror.ErrClientShutdown
 	case iggcon.TransportStateDisconnected:
 		c.logger.Debug("Cannot send data. Client is not connected.")
-		return nil, stamped, ierror.ErrNotConnected
+		return nil, stamped, generation, ierror.ErrNotConnected
 	case iggcon.TransportStateConnecting:
 		c.logger.Debug("Cannot send data. Client is still connecting.")
-		return nil, stamped, ierror.ErrNotConnected
+		return nil, stamped, generation, ierror.ErrNotConnected
 	}
 	if c.conn == nil {
-		return nil, stamped, ierror.ErrNotConnected
+		return nil, stamped, generation, ierror.ErrNotConnected
 	}
 
 	if !stamped {
@@ -754,7 +769,7 @@ func (c *IggyTcpClient) attempt(
 		// A stamp failure is local and pre-write, so it is marked as such:
 		// the connection is healthy and must not be torn down for it.
 		if err := vsr.StampRequestHeader(c.session, code, frame); err != nil {
-			return nil, false, &localPreconditionError{err}
+			return nil, false, generation, &localPreconditionError{err}
 		}
 		stamped = true
 	}
@@ -789,10 +804,10 @@ func (c *IggyTcpClient) attempt(
 
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, stamped, ctxErr
+			return nil, stamped, generation, ctxErr
 		}
 	}
-	return response, stamped, err
+	return response, stamped, generation, err
 }
 
 // exchangeLocked writes the frame and reads its reply, resending the identical
@@ -1136,6 +1151,8 @@ func (c *IggyTcpClient) Connect(ctx context.Context) (err error) {
 	c.reader = bufio.NewReaderSize(conn, 64*1024)
 	c.transportState = iggcon.TransportStateConnected
 	c.connectedAt = time.Now()
+	c.connGeneration++
+	generation := c.connGeneration
 	// The server fence does not survive the old socket, so the new connection
 	// starts from a fresh client identity.
 	c.session.Reset()
@@ -1147,7 +1164,7 @@ func (c *IggyTcpClient) Connect(ctx context.Context) (err error) {
 		slog.String("server_address", serverAddress))
 
 	if err := c.establishSession(ctx, ctx.Value(skipAutoLogin{}) != nil); err != nil {
-		_ = c.disconnect()
+		_ = c.disconnectGeneration(generation)
 		return err
 	}
 	return nil
@@ -1385,10 +1402,34 @@ func (c *IggyTcpClient) createTLSConfig(address string) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
+// disconnect tears down whatever connection the client currently holds.
 func (c *IggyTcpClient) disconnect() error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
+	return c.disconnectLocked()
+}
 
+// disconnectGeneration tears the connection down only while it is still the one
+// the caller names. A caller reacting to a request that failed has exactly one
+// connection to end -- the one that request ran on -- and by the time it gets
+// here another caller may already have dialed a replacement.
+func (c *IggyTcpClient) disconnectGeneration(generation uint64) error {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+
+	if generation != c.connGeneration {
+		// What is installed now belongs to whoever dialed it, and a reconnect
+		// grants its owner a single replay. Closing this would spend that
+		// replay on a transport marked disconnected underneath it.
+		c.logger.Debug("Not disconnecting; the connection was already replaced.",
+			slog.Uint64("failed_generation", generation),
+			slog.Uint64("current_generation", c.connGeneration))
+		return nil
+	}
+	return c.disconnectLocked()
+}
+
+func (c *IggyTcpClient) disconnectLocked() error {
 	if c.transportState == iggcon.TransportStateDisconnected || c.transportState == iggcon.TransportStateShutdown {
 		return nil
 	}
