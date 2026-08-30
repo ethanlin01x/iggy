@@ -721,13 +721,19 @@ public sealed partial class TcpMessageStream : IIggyClient
     /// <inheritdoc />
     public async Task<AuthResponse?> LoginUserAsync(string userName, string password, CancellationToken token = default)
     {
+        return await LoginUserAsync(userName, password, token, false);
+    }
+
+    private async Task<AuthResponse?> LoginUserAsync(string userName, string password, CancellationToken token,
+        bool duringConnect)
+    {
         if (State == ConnectionState.Disconnected)
         {
             throw new NotConnectedException();
         }
 
         var identity = await LoginRegisterAsync(CommandCodes.LOGIN_REGISTER_CODE,
-            LoginRegister.Serialize(userName, password), token);
+            LoginRegister.Serialize(userName, password), token, duringConnect);
         _rememberedLogin = new AutoLoginSettings
         {
             Enabled = true,
@@ -741,9 +747,14 @@ public sealed partial class TcpMessageStream : IIggyClient
     /// <inheritdoc />
     public async Task LogoutUserAsync(CancellationToken token = default)
     {
+        await LogoutUserAsync(token, false);
+    }
+
+    private async Task LogoutUserAsync(CancellationToken token, bool duringConnect)
+    {
         try
         {
-            await SendAckAsync(CommandCodes.LOGOUT_USER_CODE, ReadOnlyMemory<byte>.Empty, token);
+            await SendAckAsync(CommandCodes.LOGOUT_USER_CODE, ReadOnlyMemory<byte>.Empty, token, duringConnect);
         }
         finally
         {
@@ -803,8 +814,14 @@ public sealed partial class TcpMessageStream : IIggyClient
     /// <inheritdoc />
     public async Task<AuthResponse?> LoginWithPersonalAccessTokenAsync(string token, CancellationToken ct = default)
     {
+        return await LoginWithPersonalAccessTokenAsync(token, ct, false);
+    }
+
+    private async Task<AuthResponse?> LoginWithPersonalAccessTokenAsync(string token, CancellationToken ct,
+        bool duringConnect)
+    {
         var identity = await LoginRegisterAsync(CommandCodes.LOGIN_REGISTER_WITH_PAT_CODE,
-            LoginRegister.SerializeWithPersonalAccessToken(token), ct);
+            LoginRegister.SerializeWithPersonalAccessToken(token), ct, duringConnect);
         _rememberedLogin = new AutoLoginSettings { Enabled = true, PersonalAccessToken = token };
 
         return identity;
@@ -1300,12 +1317,12 @@ public sealed partial class TcpMessageStream : IIggyClient
         if (!string.IsNullOrEmpty(settings.PersonalAccessToken))
         {
             _logger.LogInformation("Signing in with a personal access token");
-            await LoginWithPersonalAccessTokenAsync(settings.PersonalAccessToken, token);
+            await LoginWithPersonalAccessTokenAsync(settings.PersonalAccessToken, token, true);
             return;
         }
 
         _logger.LogInformation("Signing in with credentials: {Username}", settings.Username);
-        await LoginUserAsync(settings.Username, settings.Password, token);
+        await LoginUserAsync(settings.Username, settings.Password, token, true);
     }
 
     /// <summary>
@@ -1364,19 +1381,26 @@ public sealed partial class TcpMessageStream : IIggyClient
         return e is InvalidCertificatePathException;
     }
 
-    private async Task SendAckAsync(int code, ReadOnlyMemory<byte> body, CancellationToken token)
+    private async Task SendAckAsync(int code, ReadOnlyMemory<byte> body, CancellationToken token,
+        bool duringConnect = false)
     {
-        using IMemoryOwner<byte> _ = await SendWithResponseAsync(code, body, token: token);
+        using IMemoryOwner<byte> _ = await SendWithResponseAsync(code, body, token: token,
+            duringConnect: duringConnect);
     }
 
+    /// <param name="duringConnect">
+    ///     Whether this send is the connect's own - the sign-in it runs, and the sign-out that precedes it. Such
+    ///     a send must not reconnect: it would wait on the gates the connect around it is already holding. Every
+    ///     other send reconnects even while a connect is in flight, and waits for it below.
+    /// </param>
     private async Task<IMemoryOwner<byte>> SendWithResponseAsync(int code, ReadOnlyMemory<byte> body,
-        bool autoLoginOnReconnect = true, CancellationToken token = default)
+        bool autoLoginOnReconnect = true, CancellationToken token = default, bool duringConnect = false)
     {
         try
         {
             return await SendRawAsync(code, body, token);
         }
-        catch (Exception e) when (IsLostConnection(e) && !IsConnecting && !_disposed)
+        catch (Exception e) when (IsLostConnection(e) && !duringConnect && !_disposed)
         {
             _logger.LogWarning("Connection lost");
 
@@ -1427,7 +1451,15 @@ public sealed partial class TcpMessageStream : IIggyClient
                 return await SendRawAsync(code, body, token);
             }
 
-            SetConnectionState(ConnectionState.Disconnected);
+            // A connect running elsewhere already owns the repair, and this request has no newer view of the
+            // connection than it does. Marking the client disconnected under it would send the ConnectAsync
+            // below down a dial of its own that drops the connection the first one installs; its gate is what
+            // the call waits on instead. A connect that fails leaves the state Disconnected anyway.
+            if (!IsConnecting)
+            {
+                SetConnectionState(ConnectionState.Disconnected);
+            }
+
             _logger.LogInformation("Reconnecting to the server");
             await ConnectAsync(autoLogin, token);
 

@@ -432,6 +432,73 @@ public sealed class EndpointFailoverTests
         Assert.False(reconnected, "a client that never signed in cannot restore a session by reconnecting");
     }
 
+    /// <summary>
+    ///     A request that arrives while another one is reconnecting has to wait for that reconnect and replay
+    ///     over it. Answered NotConnected by the connect in flight and then refused the retry, it would fail for
+    ///     the whole duration of the dial, for no reason of its own. Mirrors the Go suite's
+    ///     TestConnect_ConcurrentReconnectsThroughExchangeShareOneAttempt.
+    /// </summary>
+    [Fact]
+    public async Task ARequestArrivingDuringAReconnectWaitsForIt()
+    {
+        using var node = new MockNode();
+        node.Serve((connection, request) =>
+        {
+            // Ends the socket under the request in flight, which is what starts the reconnect.
+            if (connection == 0 && request.Code == PingCode)
+            {
+                return null;
+            }
+
+            return request.Code == GetClusterMetadataCode
+                ? Reply(OperationNonReplicated, ClusterMetadata(node.Port, node.Port, node.Port))
+                : Answer(request);
+        });
+
+        var configuration = new IggyClientConfigurator
+        {
+            BaseAddress = $"127.0.0.1:{node.Port}",
+            Protocol = Protocol.Tcp,
+            AutoLoginSettings = new AutoLoginSettings { Enabled = true, Username = "iggy", Password = "iggy" },
+            // The ping that drops the socket has to be the test's own: a heartbeat landing on it first would
+            // start a reconnect nothing here is waiting for.
+            HeartbeatInterval = TimeSpan.FromMinutes(1),
+            ReconnectionSettings = new ReconnectionSettings
+            {
+                Enabled = true,
+                MaxRetries = 2,
+                // The reconnect paces itself before dialing its one endpoint, and the second request lands
+                // inside that window: connected to nothing, with an attempt already owning the repair.
+                InitialDelay = TimeSpan.FromMilliseconds(500),
+                WaitAfterReconnect = TimeSpan.FromMilliseconds(20)
+            }
+        };
+        using var client = new TcpMessageStream(configuration, NullLoggerFactory.Instance);
+
+        await client.ConnectAsync(TestContext.Current.CancellationToken);
+
+        var dropped = new TaskCompletionSource();
+        client.SubscribeConnectionEvents(args =>
+        {
+            if (args.CurrentState == ConnectionState.Disconnected)
+            {
+                dropped.TrySetResult();
+            }
+
+            return Task.CompletedTask;
+        });
+
+        var reconnecting = client.PingAsync(TestContext.Current.CancellationToken);
+        await dropped.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        var arriving = client.PingAsync(TestContext.Current.CancellationToken);
+
+        await reconnecting;
+        await arriving;
+
+        Assert.Equal(2, node.Connections);
+    }
+
     private static async Task<(bool Resumed, string LastError)> ResumedWithin(TcpMessageStream client,
         TimeSpan budget)
     {
@@ -600,6 +667,15 @@ public sealed class EndpointFailoverTests
 
         public void Serve(Func<MockRequest, byte[]> handler)
         {
+            Serve((_, request) => handler(request));
+        }
+
+        /// <param name="handler">
+        ///     Answers a request on the connection of the given index, or returns null to end that socket the
+        ///     way a node dropping one does.
+        /// </param>
+        public void Serve(Func<int, MockRequest, byte[]?> handler)
+        {
             _ = Task.Run(async () =>
             {
                 while (!_killed)
@@ -614,13 +690,14 @@ public sealed class EndpointFailoverTests
                         return;
                     }
 
+                    int index;
                     lock (_accepted)
                     {
                         _accepted.Add(connection);
-                        _connections++;
+                        index = _connections++;
                     }
 
-                    _ = Task.Run(() => Exchange(connection, handler));
+                    _ = Task.Run(() => Exchange(connection, index, handler));
                 }
             });
         }
@@ -646,7 +723,7 @@ public sealed class EndpointFailoverTests
             Kill();
         }
 
-        private async Task Exchange(TcpClient connection, Func<MockRequest, byte[]> handler)
+        private async Task Exchange(TcpClient connection, int index, Func<int, MockRequest, byte[]?> handler)
         {
             try
             {
@@ -671,7 +748,12 @@ public sealed class EndpointFailoverTests
                         Interlocked.Increment(ref _pings);
                     }
 
-                    var reply = handler(request);
+                    var reply = handler(index, request);
+                    if (reply is null)
+                    {
+                        return;
+                    }
+
                     BinaryPrimitives.WriteUInt64LittleEndian(reply.AsSpan(ReplyRequestIdOffset, 8),
                         request.RequestId);
                     await stream.WriteAsync(reply);

@@ -118,13 +118,18 @@ public sealed partial class TcpMessageStream : ISessionGenerationProvider
     ///     an already-bound transport as an idempotent replay of the existing binding, so re-arming only the
     ///     local session would pair a fresh client id and request counter with the old server session.
     /// </remarks>
-    private async Task<AuthResponse?> LoginRegisterAsync(int code, byte[] message, CancellationToken token)
+    /// <param name="duringConnect">
+    ///     Whether the connect is running this sign-in. Its sends must not reconnect, and the leader settlement
+    ///     below belongs to the connect loop, which does it once the handshake is done.
+    /// </param>
+    private async Task<AuthResponse?> LoginRegisterAsync(int code, byte[] message, CancellationToken token,
+        bool duringConnect)
     {
         for (var redirects = 0; ; redirects++)
         {
             if (_consensusSession.IsBound)
             {
-                await LogoutUserAsync(token);
+                await LogoutUserAsync(token, duringConnect);
             }
             else if (State == ConnectionState.Authenticated)
             {
@@ -137,7 +142,8 @@ public sealed partial class TcpMessageStream : ISessionGenerationProvider
             try
             {
                 using IMemoryOwner<byte> responseBuffer =
-                    await SendWithResponseAsync(code, message, autoLoginOnReconnect: false, token: token);
+                    await SendWithResponseAsync(code, message, autoLoginOnReconnect: false, token: token,
+                        duringConnect: duringConnect);
 
                 response = LoginRegister.Deserialize(responseBuffer.Memory.Span);
                 _consensusSession.Bind(response.Session);
@@ -159,7 +165,10 @@ public sealed partial class TcpMessageStream : ISessionGenerationProvider
             SetConnectionState(ConnectionState.Authenticated);
 
             var authResponse = new AuthResponse((int)response.UserId, null);
-            if (IsConnecting)
+            // The connect settles leadership itself once the handshake is done, and the ConnectAsync below would
+            // reenter the gate it is holding. A caller signing in on its own still settles here, even while an
+            // unrelated connect happens to be running.
+            if (duringConnect)
             {
                 return authResponse;
             }
