@@ -35,7 +35,7 @@ use std::sync::Arc;
 use crate::config::PyClientConfig;
 use crate::consumer::{
     AutoCommit, Consumer as PyConsumer, ConsumerGroup as PyConsumerGroup,
-    ConsumerGroupDetails as PyConsumerGroupDetails, IggyConsumer,
+    ConsumerGroupDetails as PyConsumerGroupDetails, ConsumerOffsetInfo, IggyConsumer,
 };
 use crate::duration::{py_delta_to_iggy_duration, reject_zero};
 use crate::identifier::PyIdentifier;
@@ -1530,6 +1530,149 @@ impl IggyClient {
                 })
                 .collect::<Vec<_>>();
             Ok(messages)
+        })
+    }
+
+    /// Store an offset for a consumer on a partition of the specified stream and topic.
+    ///
+    /// Args:
+    ///     stream: Stream identifier as `str | int`.
+    ///     topic: Topic identifier as `str | int`.
+    ///     consumer: The `Consumer` the offset is stored for.
+    ///     offset: The offset to store, as `int`.
+    ///     partition_id: Partition ID as `int`. The server rejects a store that omits it.
+    ///         A `Consumer.Group` store also needs this client to be a member of the
+    ///         group that owns the partition.
+    ///
+    /// Returns:
+    ///     An awaitable that resolves to `None` when the offset is stored.
+    ///
+    /// Raises:
+    ///     TypeError: If `stream` or `topic` is not `str` or an integer in
+    ///         `0..=2**32 - 1`, `consumer` is not a `Consumer`, or `offset` or
+    ///         `partition_id` is not an `int`.
+    ///     ValueError: If a string identifier is empty or exceeds 255 UTF-8 bytes.
+    ///     OverflowError: If `offset` is outside the unsigned 64-bit range or
+    ///         `partition_id` is outside the unsigned 32-bit range.
+    ///     RuntimeError: If the request fails, for example when `partition_id` is omitted
+    ///         or `offset` is beyond the newest message in the partition, which includes
+    ///         any offset on an empty partition.
+    #[pyo3(signature = (stream, topic, *, consumer, offset, partition_id = None))]
+    #[gen_stub(override_return_type(type_repr="collections.abc.Awaitable[None]", imports=("collections.abc")))]
+    fn store_consumer_offset<'a>(
+        &self,
+        py: Python<'a>,
+        stream: PyIdentifier,
+        topic: PyIdentifier,
+        consumer: &PyConsumer,
+        offset: u64,
+        #[gen_stub(override_type(type_repr = "builtins.int | None"))] partition_id: Option<u32>,
+    ) -> PyResult<Bound<'a, PyAny>> {
+        let consumer = RustConsumer::try_from(consumer)?;
+        let stream = Identifier::try_from(stream)?;
+        let topic = Identifier::try_from(topic)?;
+        let inner = self.inner.clone();
+
+        future_into_py(py, async move {
+            inner
+                .store_consumer_offset(&consumer, &stream, &topic, partition_id, offset)
+                .await
+                .map_err(to_runtime_error)?;
+            Ok(())
+        })
+    }
+
+    /// Get the offset stored for a consumer on a partition of the specified stream and topic.
+    ///
+    /// Args:
+    ///     stream: Stream identifier as `str | int`.
+    ///     topic: Topic identifier as `str | int`.
+    ///     consumer: The `Consumer` whose offset is read.
+    ///     partition_id: Partition ID as `int`. Partition 0 is read when it is omitted,
+    ///         for either consumer kind.
+    ///
+    /// Returns:
+    ///     An awaitable that resolves to `ConsumerOffsetInfo` if the consumer has a stored
+    ///     offset on the partition, or `None` otherwise, including for a consumer group
+    ///     that does not exist.
+    ///
+    /// Raises:
+    ///     TypeError: If `stream` or `topic` is not `str` or an integer in
+    ///         `0..=2**32 - 1`, `consumer` is not a `Consumer`, or `partition_id` is
+    ///         not an `int`.
+    ///     ValueError: If a string identifier is empty or exceeds 255 UTF-8 bytes.
+    ///     OverflowError: If `partition_id` is outside the unsigned 32-bit range.
+    ///     RuntimeError: If the request fails.
+    #[pyo3(signature = (stream, topic, *, consumer, partition_id = None))]
+    #[gen_stub(override_return_type(type_repr="collections.abc.Awaitable[ConsumerOffsetInfo | None]", imports=("collections.abc")))]
+    fn get_consumer_offset<'a>(
+        &self,
+        py: Python<'a>,
+        stream: PyIdentifier,
+        topic: PyIdentifier,
+        consumer: &PyConsumer,
+        #[gen_stub(override_type(type_repr = "builtins.int | None"))] partition_id: Option<u32>,
+    ) -> PyResult<Bound<'a, PyAny>> {
+        let consumer = RustConsumer::try_from(consumer)?;
+        let stream = Identifier::try_from(stream)?;
+        let topic = Identifier::try_from(topic)?;
+        let inner = self.inner.clone();
+
+        future_into_py(py, async move {
+            let offset = inner
+                .get_consumer_offset(&consumer, &stream, &topic, partition_id)
+                .await
+                .map_err(to_runtime_error)?;
+            Ok(offset.map(|offset| ConsumerOffsetInfo {
+                partition_id: offset.partition_id,
+                current_offset: offset.current_offset,
+                stored_offset: offset.stored_offset,
+            }))
+        })
+    }
+
+    /// Delete the offset stored for a consumer on a partition of the specified stream and topic.
+    ///
+    /// Args:
+    ///     stream: Stream identifier as `str | int`.
+    ///     topic: Topic identifier as `str | int`.
+    ///     consumer: The `Consumer` whose offset is deleted.
+    ///     partition_id: Partition ID as `int`. The server rejects a delete that omits it.
+    ///         A `Consumer.Group` delete also needs this client to be a member of the
+    ///         group that owns the partition.
+    ///
+    /// Returns:
+    ///     An awaitable that resolves to `None` when the offset is deleted.
+    ///
+    /// Raises:
+    ///     TypeError: If `stream` or `topic` is not `str` or an integer in
+    ///         `0..=2**32 - 1`, `consumer` is not a `Consumer`, or `partition_id` is
+    ///         not an `int`.
+    ///     ValueError: If a string identifier is empty or exceeds 255 UTF-8 bytes.
+    ///     OverflowError: If `partition_id` is outside the unsigned 32-bit range.
+    ///     RuntimeError: If the request fails, for example when `partition_id` is omitted
+    ///         or the consumer has no stored offset on the partition.
+    #[pyo3(signature = (stream, topic, *, consumer, partition_id = None))]
+    #[gen_stub(override_return_type(type_repr="collections.abc.Awaitable[None]", imports=("collections.abc")))]
+    fn delete_consumer_offset<'a>(
+        &self,
+        py: Python<'a>,
+        stream: PyIdentifier,
+        topic: PyIdentifier,
+        consumer: &PyConsumer,
+        #[gen_stub(override_type(type_repr = "builtins.int | None"))] partition_id: Option<u32>,
+    ) -> PyResult<Bound<'a, PyAny>> {
+        let consumer = RustConsumer::try_from(consumer)?;
+        let stream = Identifier::try_from(stream)?;
+        let topic = Identifier::try_from(topic)?;
+        let inner = self.inner.clone();
+
+        future_into_py(py, async move {
+            inner
+                .delete_consumer_offset(&consumer, &stream, &topic, partition_id)
+                .await
+                .map_err(to_runtime_error)?;
+            Ok(())
         })
     }
 

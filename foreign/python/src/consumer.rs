@@ -373,6 +373,37 @@ impl ConsumerGroupMember {
     }
 }
 
+/// A consumer's stored offset on a partition, next to the partition's current offset.
+#[gen_stub_pyclass]
+#[pyclass]
+pub struct ConsumerOffsetInfo {
+    pub(crate) partition_id: u32,
+    pub(crate) current_offset: u64,
+    pub(crate) stored_offset: u64,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl ConsumerOffsetInfo {
+    /// Gets the identifier of the partition the offset belongs to.
+    #[getter]
+    pub fn partition_id(&self) -> u32 {
+        self.partition_id
+    }
+
+    /// Gets the offset of the newest message in the partition.
+    #[getter]
+    pub fn current_offset(&self) -> u64 {
+        self.current_offset
+    }
+
+    /// Gets the offset stored for the consumer in the partition.
+    #[getter]
+    pub fn stored_offset(&self) -> u64 {
+        self.stored_offset
+    }
+}
+
 #[pyclass]
 pub struct ReceiveMessageIterator {
     pub(crate) inner: Arc<Mutex<RustIggyConsumer>>,

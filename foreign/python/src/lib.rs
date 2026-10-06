@@ -40,7 +40,7 @@ use config::{
 };
 use consumer::{
     AutoCommit, AutoCommitAfter, AutoCommitWhen, Consumer, ConsumerGroup, ConsumerGroupDetails,
-    ConsumerGroupMember, IggyConsumer, ReceiveMessageIterator,
+    ConsumerGroupMember, ConsumerOffsetInfo, IggyConsumer, ReceiveMessageIterator,
 };
 use options::OptionSpec;
 use partitioning::Partitioning;
@@ -98,6 +98,7 @@ fn apache_iggy(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ConsumerGroup>()?;
     m.add_class::<ConsumerGroupDetails>()?;
     m.add_class::<ConsumerGroupMember>()?;
+    m.add_class::<ConsumerOffsetInfo>()?;
     m.add_class::<PollingStrategy>()?;
     m.add_class::<IggyConsumer>()?;
     m.add_class::<AutoCommit>()?;
