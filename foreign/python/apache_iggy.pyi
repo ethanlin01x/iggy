@@ -39,6 +39,7 @@ __all__ = [
     "ConsumerGroup",
     "ConsumerGroupDetails",
     "ConsumerGroupMember",
+    "ConsumerOffsetInfo",
     "DirectProducerConfig",
     "GlobalPermissions",
     "HeaderKey",
@@ -556,6 +557,27 @@ class ConsumerGroupMember:
     def partitions(self) -> builtins.list[builtins.int]:
         r"""
         Gets the collection of partitions the consumer group member is consuming.
+        """
+
+@typing.final
+class ConsumerOffsetInfo:
+    r"""
+    A consumer's stored offset on a partition, next to the partition's current offset.
+    """
+    @property
+    def partition_id(self) -> builtins.int:
+        r"""
+        Gets the identifier of the partition the offset belongs to.
+        """
+    @property
+    def current_offset(self) -> builtins.int:
+        r"""
+        Gets the offset of the newest message in the partition.
+        """
+    @property
+    def stored_offset(self) -> builtins.int:
+        r"""
+        Gets the offset stored for the consumer in the partition.
         """
 
 @typing.final
@@ -1880,6 +1902,103 @@ class IggyClient:
         Omitting `partition_id` reads partition 0 for a regular consumer, and
         polls the member's assigned partitions for a consumer group.
         Returns a list of received messages or a RuntimeError on failure.
+        """
+    def store_consumer_offset(
+        self,
+        stream: builtins.str | builtins.int,
+        topic: builtins.str | builtins.int,
+        *,
+        consumer: Consumer,
+        offset: builtins.int,
+        partition_id: builtins.int | None = None,
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Store an offset for a consumer on a partition of the specified stream and topic.
+
+        Args:
+            stream: Stream identifier as `str | int`.
+            topic: Topic identifier as `str | int`.
+            consumer: The `Consumer` the offset is stored for.
+            offset: The offset to store, as `int`.
+            partition_id: Partition ID as `int`. The server rejects a store that omits it.
+                A `Consumer.Group` store also needs this client to be a member of the
+                group that owns the partition.
+
+        Returns:
+            An awaitable that resolves to `None` when the offset is stored.
+
+        Raises:
+            TypeError: If `stream` or `topic` is not `str` or an integer in
+                `0..=2**32 - 1`, `consumer` is not a `Consumer`, or `offset` or
+                `partition_id` is not an `int`.
+            ValueError: If a string identifier is empty or exceeds 255 UTF-8 bytes.
+            OverflowError: If `offset` is outside the unsigned 64-bit range or
+                `partition_id` is outside the unsigned 32-bit range.
+            RuntimeError: If the request fails, for example when `partition_id` is omitted
+                or `offset` is beyond the newest message in the partition, which includes
+                any offset on an empty partition.
+        """
+    def get_consumer_offset(
+        self,
+        stream: builtins.str | builtins.int,
+        topic: builtins.str | builtins.int,
+        *,
+        consumer: Consumer,
+        partition_id: builtins.int | None = None,
+    ) -> collections.abc.Awaitable[ConsumerOffsetInfo | None]:
+        r"""
+        Get the offset stored for a consumer on a partition of the specified stream and topic.
+
+        Args:
+            stream: Stream identifier as `str | int`.
+            topic: Topic identifier as `str | int`.
+            consumer: The `Consumer` whose offset is read.
+            partition_id: Partition ID as `int`. Partition 0 is read when it is omitted,
+                for either consumer kind.
+
+        Returns:
+            An awaitable that resolves to `ConsumerOffsetInfo` if the consumer has a stored
+            offset on the partition, or `None` otherwise, including for a consumer group
+            that does not exist.
+
+        Raises:
+            TypeError: If `stream` or `topic` is not `str` or an integer in
+                `0..=2**32 - 1`, `consumer` is not a `Consumer`, or `partition_id` is
+                not an `int`.
+            ValueError: If a string identifier is empty or exceeds 255 UTF-8 bytes.
+            OverflowError: If `partition_id` is outside the unsigned 32-bit range.
+            RuntimeError: If the request fails.
+        """
+    def delete_consumer_offset(
+        self,
+        stream: builtins.str | builtins.int,
+        topic: builtins.str | builtins.int,
+        *,
+        consumer: Consumer,
+        partition_id: builtins.int | None = None,
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Delete the offset stored for a consumer on a partition of the specified stream and topic.
+
+        Args:
+            stream: Stream identifier as `str | int`.
+            topic: Topic identifier as `str | int`.
+            consumer: The `Consumer` whose offset is deleted.
+            partition_id: Partition ID as `int`. The server rejects a delete that omits it.
+                A `Consumer.Group` delete also needs this client to be a member of the
+                group that owns the partition.
+
+        Returns:
+            An awaitable that resolves to `None` when the offset is deleted.
+
+        Raises:
+            TypeError: If `stream` or `topic` is not `str` or an integer in
+                `0..=2**32 - 1`, `consumer` is not a `Consumer`, or `partition_id` is
+                not an `int`.
+            ValueError: If a string identifier is empty or exceeds 255 UTF-8 bytes.
+            OverflowError: If `partition_id` is outside the unsigned 32-bit range.
+            RuntimeError: If the request fails, for example when `partition_id` is omitted
+                or the consumer has no stored offset on the partition.
         """
     def consumer_group(
         self,
